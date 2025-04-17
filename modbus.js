@@ -1,4 +1,3 @@
-// modbus.js - Complete Implementation
 let port = null;
 let reader = null;
 let isProcessing = false;
@@ -6,8 +5,8 @@ let pollingActive = false;
 const transactionQueue = [];
 const pendingTransactions = new Map();
 const BAUD_RATE = 9600;
-const CHAR_TIME_MS = (10 / BAUD_RATE) * 1000; // 10 bits per character
-const RESPONSE_TIMEOUT = 1000; // 1 second
+const CHAR_TIME_MS = (10 / BAUD_RATE) * 1000;
+const RESPONSE_TIMEOUT = 1000;
 
 // DOM Elements
 const connectButton = document.getElementById('connectButton');
@@ -24,8 +23,6 @@ document.addEventListener('DOMContentLoaded', () => {
 function initializeRegisterRows() {
     const template = document.getElementById('rowTemplate');
     const container = document.getElementById('registerRows');
-    
-    // Create 10 register rows
     for (let i = 0; i < 10; i++) {
         const clone = document.importNode(template.content, true);
         container.appendChild(clone);
@@ -99,7 +96,6 @@ async function handleTransaction({ slave, reg }) {
         const transactionId = Symbol();
 
         try {
-            // Send request with RS485 timing
             await sendFrame(frame);
             logTransaction('SENT', frame);
 
@@ -113,7 +109,8 @@ async function handleTransaction({ slave, reg }) {
             pendingTransactions.set(transactionId, {
                 reg,
                 timeoutId,
-                resolve
+                resolve,
+                sentAt: Date.now()
             });
         } catch (error) {
             handleError(`Transaction error: ${error.message}`);
@@ -127,9 +124,7 @@ async function sendFrame(frame) {
     try {
         await writer.write(frame);
         // RS485 turnaround delay
-        await new Promise(resolve => 
-            setTimeout(resolve, 3.5 * CHAR_TIME_MS)
-        );
+        await new Promise(resolve => setTimeout(resolve, 3.5 * CHAR_TIME_MS));
     } finally {
         writer.releaseLock();
     }
@@ -143,59 +138,80 @@ async function setupReader() {
         while (true) {
             const { value, done } = await reader.read();
             if (done) break;
-            
+            if (!value) continue;
+
             buffer = concatUint8Arrays(buffer, value);
-            
-            while (true) {
+
+            // Defensive: avoid infinite loop
+            let safety = 100;
+            while (buffer.length >= 7 && safety-- > 0) {
                 const frameInfo = extractFrame(buffer);
                 if (!frameInfo) break;
-                
+
                 buffer = frameInfo.remaining;
                 processResponse(frameInfo.frame);
             }
+            if (safety <= 0) {
+                handleError("Frame extraction safety limit reached, clearing buffer.");
+                buffer = new Uint8Array(0);
+            }
         }
     } catch (error) {
-        if (pollingActive) handleError(`Read error: ${error.message}`);
+        handleError(`Read error: ${error && error.message ? error.message : error}`);
     } finally {
-        reader.releaseLock();
+        reader && reader.releaseLock();
     }
 }
 
 function extractFrame(buffer) {
-    // Minimum frame size: 1b address + 1b function + 2b CRC = 4 bytes
-    if (buffer.length < 4) return null;
-
-    // Search for valid frames using CRC check
-    for (let start = 0; start <= buffer.length - 4; start++) {
-        const end = Math.min(start + 256, buffer.length); // Max frame length 256 bytes
-        for (let i = start; i < end - 1; i++) {
-            const potentialFrame = buffer.slice(start, i + 2);
-            if (validateFrame(potentialFrame)) {
-                return {
-                    frame: potentialFrame,
-                    remaining: buffer.slice(i + 2)
-                };
-            }
+    // Minimum Modbus RTU response frame: 7 bytes (for 1 register read)
+    for (let i = 0; i <= buffer.length - 7; i++) {
+        const candidate = buffer.slice(i, i + 7);
+        if (validateFrame(candidate)) {
+            return {
+                frame: candidate,
+                remaining: buffer.slice(i + 7)
+            };
         }
+    }
+    // If no valid frame found, and buffer is too large, drop first byte
+    if (buffer.length > 32) {
+        return {
+            frame: null,
+            remaining: buffer.slice(1)
+        };
     }
     return null;
 }
 
 function processResponse(frame) {
+    if (!frame || frame.length < 7) {
+        logTransaction('INVALID', frame || [], "Malformed frame");
+        return;
+    }
     logTransaction('RECEIVED', frame);
-    
+
     // Match to oldest pending transaction
-    const [transactionId, transaction] = pendingTransactions.entries().next().value;
-    if (!transaction) return;
+    const firstPending = pendingTransactions.entries().next();
+    if (!firstPending || firstPending.done) {
+        logTransaction('UNEXPECTED', frame, "No pending transaction");
+        return;
+    }
+    const [transactionId, transaction] = firstPending.value;
 
     clearTimeout(transaction.timeoutId);
     pendingTransactions.delete(transactionId);
 
-    // Parse response (example for function code 0x03)
+    // Parse response (function code 0x03)
+    // [slave][fc][bytecount][hi][lo][crc_lo][crc_hi]
     const byteCount = frame[2];
+    if (byteCount !== 2) {
+        logTransaction('INVALID', frame, "Unexpected byte count");
+        return;
+    }
     const reg = transaction.reg;
     const rawValue = (frame[3] << 8) | frame[4];
-    
+
     updateRegisterDisplay(reg, rawValue);
     transaction.resolve();
 }
@@ -318,22 +334,29 @@ function validateSlaveAddress() {
 
 function logTransaction(direction, data, message = '') {
     const timestamp = new Date().toISOString();
-    const hexString = Array.from(data)
-        .map(b => b.toString(16).padStart(2, '0').toUpperCase())
-        .join(' ');
+    let hexString = '';
+    if (data && typeof data.length === 'number') {
+        hexString = Array.from(data)
+            .map(b => b.toString(16).padStart(2, '0').toUpperCase())
+            .join(' ');
+    } else {
+        hexString = '[no data]';
+    }
 
     const entry = document.createElement('div');
     entry.style.color = {
         SENT: '#0000CC',
         RECEIVED: '#009900',
-        TIMEOUT: '#CC0000'
+        TIMEOUT: '#CC0000',
+        INVALID: '#FF9900',
+        UNEXPECTED: '#FF00CC'
     }[direction] || '#000000';
 
     entry.innerHTML = `
         <span class="timestamp">${timestamp}</span>
         <span class="direction">${direction.padEnd(9)}</span>
         <span class="data">${hexString}</span>
-        <span class="message">${message}</span>
+        <span class="message">${message || ''}</span>
     `;
     
     debugWindow.appendChild(entry);
@@ -353,7 +376,7 @@ function handleError(message) {
     debugWindow.scrollTop = debugWindow.scrollHeight;
 }
 
-// Style for debug window (add to CSS)
+// Add debug window CSS for clarity
 const debugStyle = document.createElement('style');
 debugStyle.textContent = `
     .timestamp { color: #666; margin-right: 10px; }
