@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Modbus Multi-Register Monitor</title>
+    <style>
+        body { font-family: Arial, sans-serif; background: #f7f7f7; margin: 0; padding: 20px; }
+        .container { background: #fff; padding: 2em; max-width: 800px; margin: 0 auto; border-radius: 8px; box-shadow: 0 2px 8px #0001; }
+        .config-row { display: grid; grid-template-columns: 120px 120px auto; gap: 1em; align-items: center; margin: 0.5em 0; }
+        .header { font-weight: bold; margin-bottom: 1em; }
+        button { padding: 8px 15px; margin: 0.5em 0; cursor: pointer; }
+        #status { color: #666; margin: 1em 0; }
+        #debugWindow { height: 200px; overflow-y: auto; border: 1px solid #ccc; padding: 10px; font-family: monospace; margin-top: 1em; background: #f8f8f8; }
+        .valueDisplay { font-family: monospace; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>Modbus Multi-Register Monitor</h2>
+        
+        <!-- Connection Controls -->
+        <div class="config-row">
+            <input type="number" id="slaveAddress" value="26" min="1" max="247" style="width: 120px;">
+            <button id="connectButton">Connect Serial</button>
+            <div id="status">Status: Disconnected</div>
+        </div>
+
+        <!-- Register Configuration -->
+        <div class="config-row header">
+            <div>Register Address</div>
+            <div>Signed</div>
+            <div>Value</div>
+        </div>
+        <div id="registerRows">
+            <template id="rowTemplate">
+                <div class="config-row">
+                    <input type="number" class="regAddress" placeholder="0-65535" min="0" max="65535">
+                    <label><input type="checkbox" class="signedCheck"> Signed</label>
+                    <div class="valueDisplay">-</div>
+                </div>
+            </template>
+        </div>
+
+        <!-- Polling Controls -->
+        <div>
+            <button id="startButton" disabled>Start Polling</button>
+            <button id="stopButton" disabled>Stop</button>
+        </div>
+
+        <!-- Debug Window -->
+        <h3>Transaction Log</h3>
+        <div id="debugWindow"></div>
+        <button onclick="document.getElementById('debugWindow').innerHTML = ''">Clear Log</button>
+    </div>
+
+    <script src="modbus.js"></script>
+</body>
+</html>
