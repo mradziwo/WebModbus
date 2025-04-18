@@ -2,11 +2,16 @@ let port = null;
 let reader = null;
 let pollingActive = false;
 let transactionId = 0; // Sequential transaction counter
+
 const BAUD_RATE = 9600;
 const CHAR_TIME_MS = (10 / BAUD_RATE) * 1000;
 const RESPONSE_TIMEOUT = 1000;
 
-// DOM Elements
+// Recording-related variables
+let isRecording = false;
+let recordedData = [];
+let recordButton = null;
+
 const connectButton = document.getElementById('connectButton');
 const startButton = document.getElementById('startButton');
 const stopButton = document.getElementById('stopButton');
@@ -16,6 +21,17 @@ const debugWindow = document.getElementById('debugWindow');
 document.addEventListener('DOMContentLoaded', () => {
     initializeRegisterRows();
     setupEventListeners();
+    recordButton = document.getElementById('recordButton');
+    if (!recordButton) {
+        // Create the record button if not present
+        const btn = document.createElement('button');
+        btn.id = 'recordButton';
+        btn.disabled = true;
+        btn.textContent = 'Start Recording';
+        stopButton.parentNode.insertBefore(btn, stopButton.nextSibling);
+        recordButton = btn;
+    }
+    recordButton.addEventListener('click', toggleRecording);
 });
 
 function initializeRegisterRows() {
@@ -59,30 +75,47 @@ async function startPolling() {
     updateUIState('polling');
     
     while (pollingActive) {
+        const cycleTimestamp = new Date().toISOString();
         const slave = parseInt(document.getElementById('slaveAddress').value);
+        let cycleValues = [];
         for (const row of window.rows) {
             if (!pollingActive) break;
             const regInput = row.querySelector('.regAddress');
             const reg = parseInt(regInput.value);
-            if (isNaN(reg)) continue;
-            
-            transactionId++; // Increment for new transaction
+            if (isNaN(reg)) {
+                cycleValues.push('');
+                continue;
+            }
+            transactionId++;
             await handleTransaction(slave, reg, row, transactionId);
+            // After transaction, get the latest value from the display
+            const val = row.querySelector('.valueDisplay').textContent;
+            cycleValues.push(val !== '-' ? val : '');
+        }
+        // After all registers in this cycle, record if recording is active
+        if (isRecording) {
+            recordedData.push([cycleTimestamp, ...cycleValues]);
         }
         if (pollingActive) await sleep(1000);
     }
 }
 
+function stopPolling() {
+    pollingActive = false;
+    if (isRecording) {
+        downloadRecordedData();
+        isRecording = false;
+        recordButton.textContent = 'Start Recording';
+        recordedData = [];
+    }
+    updateUIState('stopped');
+}
+
 async function handleTransaction(slave, reg, row, tid) {
     const frame = createModbusFrame(slave, reg);
     try {
-        // Phase 1: Send request
         await sendFrame(frame, tid);
-
-        // Phase 2: Wait for response
         const response = await waitForResponse(tid);
-
-        // Phase 3: Process result
         if (response) {
             processValidResponse(response, tid, reg, row);
         } else {
@@ -98,7 +131,7 @@ async function sendFrame(frame, tid) {
     try {
         await writer.write(frame);
         logTransaction('SENT', frame, tid);
-        await sleep(3.5 * CHAR_TIME_MS); // RS485 turnaround
+        await sleep(3.5 * CHAR_TIME_MS);
     } finally {
         writer.releaseLock();
     }
@@ -116,8 +149,6 @@ async function waitForResponse(tid) {
             if (done) break;
             if (!value) continue;
             buffer = concatUint8Arrays(buffer, value);
-
-            // Process all complete frames in buffer
             while (buffer.length >= 7) {
                 const frameInfo = extractFrame(buffer);
                 if (!frameInfo) break;
@@ -255,6 +286,20 @@ function updateUIState(state) {
     connectButton.textContent = connectText;
     startButton.disabled = startDisabled;
     stopButton.disabled = stopDisabled;
+
+    // Enable/disable record button
+    if (recordButton) {
+        if (state === 'polling') {
+            recordButton.disabled = false;
+        } else {
+            recordButton.disabled = true;
+            if (isRecording) {
+                isRecording = false;
+                recordedData = [];
+                recordButton.textContent = 'Start Recording';
+            }
+        }
+    }
 }
 
 function logTransaction(direction, data, tid, message = '') {
@@ -271,12 +316,13 @@ function logTransaction(direction, data, tid, message = '') {
         RECEIVED: '#009900',
         TIMEOUT: '#CC0000',
         INVALID: '#FF9900',
-        ERROR: '#FF00FF'
+        ERROR: '#FF00FF',
+        RECORD: '#0066CC'
     }[direction] || '#000000';
 
     entry.innerHTML = `
         <span class="timestamp">${timestamp}</span>
-        <span class="tid" style="color:#666; font-family:monospace; margin-right:10px;">[TID:${tid.toString().padStart(4, '0')}]</span>
+        <span class="tid" style="color:#666; font-family:monospace; margin-right:10px;">${tid ? `[TID:${tid.toString().padStart(4, '0')}]` : ''}</span>
         <span class="direction">${direction.padEnd(9)}</span>
         <span class="data">${hexString}</span>
         <span class="message">${message}</span>
@@ -301,6 +347,46 @@ function handleError(message, tid = '') {
 
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Recording-related functions
+function toggleRecording() {
+    if (!isRecording) {
+        isRecording = true;
+        recordedData = [];
+        recordButton.textContent = 'Stop Recording & Save';
+        logTransaction('RECORD', null, null, 'Recording started');
+    } else {
+        isRecording = false;
+        downloadRecordedData();
+        recordedData = [];
+        recordButton.textContent = 'Start Recording';
+    }
+}
+
+function downloadRecordedData() {
+    if (recordedData.length === 0) {
+        handleError('No recorded data to download');
+        return;
+    }
+    // Header: Timestamp, Register_1, Register_2, ...
+    const headers = ['Timestamp', ...window.rows.map((row, i) =>
+        `Register_${row.querySelector('.regAddress').value || (i + 1)}`)];
+    const csvContent = [
+        headers.join(','),
+        ...recordedData.map(row => row.join(','))
+    ].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `modbus_recording_${new Date().toISOString().slice(0,16)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    logTransaction('RECORD', null, null, `Saved ${recordedData.length} records`);
 }
 
 // Add debug window CSS for clarity
